@@ -96,6 +96,7 @@ Beyond per-channel session history, the bot has a vector-memory backend that **s
 - `/remember scope text` — Adds a fact to persistent memory (user or channel scope).
 - `/forget scope confirm` — Deletes the entire user-wing or channel-wing of persistent memory. `confirm` must equal `evet sil` or `yes delete`.
 - `/memory_list scope` — Lists current persistent notes for the user or channel (ephemeral).
+- `/memory` — Combined overview: caller's user-wing **and** the current channel-wing in one ephemeral code-block dump (max 50 each, with stats footer). For deeper per-scope lists use `/memory_list`.
 
 Slash commands are synced once in `bot.setup_hook` (called by discord.py before `on_ready`, only once per process).
 

@@ -313,4 +313,46 @@ async def on_message(message: discord.Message):
         ))
 
 
+@bot.tree.command(
+    name="memory",
+    description="Kalıcı hafızanın tüm özetini göster (sana özel + bu kanal)",
+)
+async def memory_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    user_facts, chan_facts = await asyncio.gather(
+        memory.list_user_facts(interaction.user.id, limit=50),
+        memory.list_channel_facts(interaction.channel_id, limit=50),
+    )
+
+    if not user_facts and not chan_facts:
+        await interaction.followup.send(
+            "Hafıza tamamen boş — `/remember` ile başlayabilirsin.",
+            ephemeral=True,
+        )
+        return
+
+    parts: list[str] = ["## Sana özel hatırladıklarım"]
+    if user_facts:
+        parts.extend(f"- {f}" for f in user_facts)
+    else:
+        parts.append("(yok)")
+    parts.append("")
+    parts.append("## Bu kanalda hatırladıklarım")
+    if chan_facts:
+        parts.extend(f"- {f}" for f in chan_facts)
+    else:
+        parts.append("(yok)")
+    parts.append("")
+    parts.append(
+        f"[user: {len(user_facts)} not • channel: {len(chan_facts)} not • "
+        f"palace: {config.MEMPALACE_PATH}]"
+    )
+
+    body = "\n".join(parts)
+    msg = f"```\n{body}\n```"
+    if len(msg) > 1990:
+        msg = msg[:1970] + "\n... (kesildi, /memory_list ile gör)\n```"
+    await interaction.followup.send(msg, ephemeral=True)
+
+
 bot.run(config.DISCORD_TOKEN)
