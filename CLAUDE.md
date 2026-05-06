@@ -13,10 +13,11 @@ bot.py            # Discord client + slash commands + event handlers (entry poin
 config.py         # .env loading; exports DISCORD_TOKEN, OPENAI_*, SYSTEM_PROMPT, session/history limits, GUILD_ID
 llm_client.py     # AsyncOpenAI wrapper; LLMClient.complete(messages) -> str
 session_store.py  # Per-channel sliding session with asyncio.Lock; SessionStore + Session
+transcription.py  # faster-whisper STT wrapper; lazy-loads model on first audio attachment
 prompts/
   persona.txt     # System prompt — edit this to change the bot's persona, no code change needed
 .env.example      # Copy to `.env` and fill in DISCORD_TOKEN (and optionally GUILD_ID)
-requirements.txt  # discord.py, python-dotenv, openai
+requirements.txt  # discord.py, python-dotenv, openai, mempalace, faster-whisper
 ```
 
 ## Run
@@ -69,7 +70,8 @@ State lives in `session_store.py` and is in-memory only (lost on restart).
 - **Cap:** `HISTORY_MAX_MESSAGES` (default 100). The `system` message at index 0 is preserved; oldest user/assistant messages are FIFO-trimmed beyond the cap.
 - **Reset:** `/clear` slash command (see below) wipes the session for the current channel.
 - **Locking:** Each `Session` has its own `asyncio.Lock`. `bot.py` holds it only across list mutations (append, snapshot) — never across the LLM call, so a slow completion does not block the channel.
-- **Multi-modal:** Image attachments (MIME `image/*`) are downloaded by the bot itself (via `discord.Attachment.read()`, which goes through `bot.http`'s session and therefore through `DISCORD_PROXY` if set) and **base64-encoded** into the LLM payload as `{"type": "image_url", "image_url": {"url": "data:<mime>;base64,..."}}` data-URL parts via `_build_user_content`. The LLM server therefore never makes its own outbound HTTP request — important when the server (e.g. `llama-server`) runs without proxy support and Discord CDN is firewalled. History stores only a text-only line `<display_name>: <content> [resim: <filename>]` (no URL, no base64) via `_format_for_history`; visual context is carried forward by the bot's own text replies.
+- **Multi-modal (vision):** Image attachments (MIME `image/*`) are downloaded by the bot itself (via `discord.Attachment.read()`, which goes through `bot.http`'s session and therefore through `DISCORD_PROXY` if set) and **base64-encoded** into the LLM payload as `{"type": "image_url", "image_url": {"url": "data:<mime>;base64,..."}}` data-URL parts via `_prepare_user_message`. The LLM server therefore never makes its own outbound HTTP request — important when the server (e.g. `llama-server`) runs without proxy support and Discord CDN is firewalled. History stores only a text-only line `<display_name>: <content> [resim: <filename>]` (no URL, no base64); visual context is carried forward by the bot's own text replies.
+- **Multi-modal (audio):** Audio attachments (MIME `audio/*`, including Discord voice messages which are `audio/ogg`) are downloaded the same way and **transcribed locally** via `faster-whisper` (`transcription.py`). The model (`Systran/faster-whisper-<size>`, default `base` ~140 MB) lazy-loads on the first audio message — startup stays fast and users who never send audio never pay the cost. The LLM model itself does **not** need to be audio-capable; it sees only the transcript text. Transcripts ARE stored in session history (unlike base64 images) — they're cheap text and useful for later recall ("o ses notunda ne demiştim?"). Failed transcriptions degrade to a `[ses (...): transkripsiyon başarısız]` placeholder so the message handler never crashes. Disable entirely with `AUDIO_TRANSCRIBE=false`.
 
 ## Persistent memory (long-term)
 

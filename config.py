@@ -33,3 +33,9 @@ MEMORY_AUTO_EXTRACT = os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true"
 MEMORY_EXTRACT_EVERY_N_MESSAGES = int(os.getenv("MEMORY_EXTRACT_EVERY_N_MESSAGES", "8"))
 MEMORY_RETRIEVAL_K = int(os.getenv("MEMORY_RETRIEVAL_K", "3"))
 MEMORY_MIN_FACT_LEN = int(os.getenv("MEMORY_MIN_FACT_LEN", "6"))
+
+AUDIO_TRANSCRIBE = os.getenv("AUDIO_TRANSCRIBE", "true").lower() == "true"
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "").strip() or None

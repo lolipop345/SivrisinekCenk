@@ -16,6 +16,7 @@ from llm_client import LLMClient
 from memory_manager import MemoryManager
 from session_store import SessionStore
 from tools import TOOLS
+from transcription import Transcriber
 
 
 def _preflight() -> None:
@@ -76,6 +77,20 @@ def _preflight() -> None:
         sys.exit(1)
     print(f"[preflight] memory palace at {config.MEMPALACE_PATH} OK", flush=True)
 
+    if config.AUDIO_TRANSCRIBE:
+        try:
+            import faster_whisper  # noqa: F401
+        except ImportError as e:
+            print(f"[preflight] AUDIO_TRANSCRIBE=true but faster-whisper not installed: {e}", file=sys.stderr)
+            print("[preflight] run: pip install faster-whisper  (or set AUDIO_TRANSCRIBE=false)", file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"[preflight] audio transcription enabled "
+            f"(whisper-{config.WHISPER_MODEL_SIZE}, device={config.WHISPER_DEVICE}, "
+            f"compute={config.WHISPER_COMPUTE_TYPE}; model lazy-loads on first audio)",
+            flush=True,
+        )
+
 
 _preflight()
 
@@ -104,6 +119,17 @@ memory = MemoryManager(
     min_fact_len=config.MEMORY_MIN_FACT_LEN,
 )
 
+transcriber: Transcriber | None = (
+    Transcriber(
+        model_size=config.WHISPER_MODEL_SIZE,
+        device=config.WHISPER_DEVICE,
+        compute_type=config.WHISPER_COMPUTE_TYPE,
+        language=config.WHISPER_LANGUAGE,
+    )
+    if config.AUDIO_TRANSCRIBE
+    else None
+)
+
 
 def _should_respond(message: discord.Message) -> bool:
     if bot.user in message.mentions:
@@ -115,44 +141,70 @@ def _should_respond(message: discord.Message) -> bool:
 
 
 IMAGE_MIME_PREFIX = "image/"
+AUDIO_MIME_PREFIX = "audio/"
 
 
-def _image_attachments(message: discord.Message) -> list[discord.Attachment]:
-    return [
-        a for a in message.attachments
-        if (a.content_type or "").startswith(IMAGE_MIME_PREFIX)
-    ]
+async def _prepare_user_message(
+    message: discord.Message,
+) -> tuple[str, str | list[dict]]:
+    """Build (history_text, llm_content) from a Discord message.
 
-
-async def _build_user_content(message: discord.Message) -> str | list[dict]:
+    - Images: base64-inlined into the LLM content as image_url parts; only a
+      [resim: name] tag is stored in history (base64 in history would bloat).
+    - Audio: transcribed via Whisper once; the transcript text is inlined into
+      BOTH the LLM payload and history (transcripts are cheap text and useful
+      for later recall, unlike base64 images).
+    """
     author = message.author.display_name
-    text = f"{author}: {message.content}".strip()
-    images = _image_attachments(message)
-    if not images:
-        return text
-    parts: list[dict] = [{"type": "text", "text": text}]
-    for a in images:
-        try:
-            data = await a.read()
-        except Exception:
-            continue
-        mime = a.content_type or "image/jpeg"
-        b64 = base64.b64encode(data).decode("ascii")
-        parts.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{b64}"},
-        })
-    return parts
+    base = f"{author}: {message.content}".strip()
 
+    image_parts: list[dict] = []
+    image_history_tags: list[str] = []
+    audio_lines: list[str] = []
 
-def _format_for_history(message: discord.Message) -> str:
-    author = message.author.display_name
-    base = f"{author}: {message.content}"
-    images = _image_attachments(message)
-    if not images:
-        return base
-    tags = " ".join(f"[resim: {a.filename}]" for a in images)
-    return f"{base} {tags}".strip()
+    for a in message.attachments:
+        ct = a.content_type or ""
+        if ct.startswith(IMAGE_MIME_PREFIX):
+            try:
+                data = await a.read()
+            except Exception:
+                continue
+            mime = ct or "image/jpeg"
+            b64 = base64.b64encode(data).decode("ascii")
+            image_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+            image_history_tags.append(f"[resim: {a.filename}]")
+        elif ct.startswith(AUDIO_MIME_PREFIX) and transcriber is not None:
+            try:
+                data = await a.read()
+                text = (await transcriber.transcribe(data)).strip()
+            except Exception as e:
+                print(f"[transcribe] {a.filename} failed: {e}", file=sys.stderr)
+                audio_lines.append(f"[ses ({a.filename}): transkripsiyon başarısız]")
+                continue
+            if text:
+                audio_lines.append(f"[ses transkripti ({a.filename}): {text}]")
+            else:
+                audio_lines.append(f"[ses ({a.filename}): boş/sessiz]")
+
+    text_with_audio = base
+    if audio_lines:
+        text_with_audio = (base + " " + " ".join(audio_lines)).strip()
+
+    if image_parts:
+        llm_content: str | list[dict] = (
+            [{"type": "text", "text": text_with_audio}] + image_parts
+        )
+    else:
+        llm_content = text_with_audio
+
+    history_text = text_with_audio
+    if image_history_tags:
+        history_text = (history_text + " " + " ".join(image_history_tags)).strip()
+
+    return history_text, llm_content
 
 
 async def _setup_hook():
@@ -363,8 +415,7 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    history_content = _format_for_history(message)
-    llm_content = await _build_user_content(message)
+    history_content, llm_content = await _prepare_user_message(message)
     channel_id = message.channel.id
     guild_id = message.guild.id if message.guild else None
 
@@ -381,7 +432,7 @@ async def on_message(message: discord.Message):
         notes = await memory.query_relevant(
             user_id=message.author.id,
             channel_id=channel_id,
-            query=message.content or "",
+            query=history_content or message.content or "",
             guild_id=guild_id,
         )
     except Exception as e:

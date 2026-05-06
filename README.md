@@ -1,12 +1,13 @@
 # SivrisinekCenk
 
-Türkçe konuşan, kalıcı hafızalı, görüntü algılayabilen Discord botu. Tüm LLM trafiği **lokal** çalışır (LM Studio, `llama-server`, vLLM, Ollama vb. OpenAI-compat sunucu) — Anthropic/OpenAI API'sine bağımlı değildir.
+Türkçe konuşan, kalıcı hafızalı, görüntü ve ses algılayabilen Discord botu. Tüm LLM trafiği **lokal** çalışır (LM Studio, `llama-server`, vLLM, Ollama vb. OpenAI-compat sunucu) — Anthropic/OpenAI API'sine bağımlı değildir.
 
 ## Özellikler
 
 - **Türkçe persona** — `prompts/persona.txt` dosyasını editleyerek karakteri/üslubu değiştir, kod dokunmadan.
 - **Lokal LLM** — `OPENAI_BASE_URL` ile herhangi bir OpenAI-uyumlu sunucuya bağlanır (default `http://localhost:8000/v1`).
 - **Multi-modal (vision)** — kullanıcı bir mesajla beraber `image/*` attach ederse bot resmi görüp yorumlar (vision-capable model gerek; resim bot tarafından base64 olarak inline edilir, LLM sunucusu Discord CDN'e ulaşmak zorunda kalmaz).
+- **Audio (Whisper STT)** — `audio/*` ek (Discord voice message dahil) yerel `faster-whisper` ile transkript edilir, transkript metni LLM'e text olarak verilir. Model audio-capable olmak zorunda değil; ilk ses geldiğinde Whisper modeli (`base`, ~140 MB) lazy-load olur. Devre dışı: `AUDIO_TRANSCRIBE=false`.
 - **Konuşma hafızası (kısa vadeli)** — kanal başına 2 saatlik sliding session, max 100 mesaj.
 - **Kalıcı hafıza (uzun vadeli, restart sonrası kalır)** — ChromaDB tabanlı yerel vector store (MemPalace), 3 kapsam:
   - `user` — sana özel, hangi kanalda olursan ol hatırlanır
@@ -107,6 +108,7 @@ llm_client.py     — AsyncOpenAI wrapper (tools desteği var)
 session_store.py  — Kanal başına in-memory sliding session
 memory_manager.py — MemPalace adapter; user/channel/guild wing'leri, retrieval, auto-extract
 tools.py          — LLM'e gösterilen tool tanımları (save_memory)
+transcription.py  — faster-whisper STT wrapper, lazy load + executor offload
 prompts/
   persona.txt        — Sistem promptu (persona)
   extract_facts.txt  — Auto-extract LLM promptu
@@ -116,7 +118,7 @@ start.sh          — SpoofDPI + bot orkestrasyonu
 `on_message` akışı:
 1. Mesajı session history'ye ekle
 2. Trigger kontrolü (mention/name/reply)
-3. Multi-modal içerik hazırla (resim varsa base64)
+3. Multi-modal içerik hazırla (resim → base64 inline; ses → Whisper transkript inline)
 4. `query_relevant` ile **3 paralel** search (user + channel + guild) → notes inject
 5. `_run_with_tools` ile LLM çağrı (tools=[save_memory], max 4 iter)
 6. Cevabı reply olarak gönder + session'a yaz
@@ -139,6 +141,11 @@ start.sh          — SpoofDPI + bot orkestrasyonu
 | `MEMORY_EXTRACT_EVERY_N_MESSAGES` | `8` | Auto-extract eşiği |
 | `MEMORY_RETRIEVAL_K` | `3` | Her scope için retrieve edilecek not sayısı |
 | `MEMORY_MIN_FACT_LEN` | `6` | Bu uzunluğun altındaki fact'ler reddedilir |
+| `AUDIO_TRANSCRIBE` | `true` | Audio attachment'ları Whisper ile transkript et |
+| `WHISPER_MODEL_SIZE` | `base` | `tiny`/`base`/`small`/`medium`/`large-v3` — kalite/hız trade-off |
+| `WHISPER_DEVICE` | `cpu` | `cpu` veya `cuda` (CUDA için ayrıca `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`) |
+| `WHISPER_COMPUTE_TYPE` | `int8` | `int8` (CPU), `float16` (GPU), `int8_float16` (GPU dengeli) |
+| `WHISPER_LANGUAGE` | boş | Boş = oto-tespit (önerilen). Hep TR ise `tr` set et — daha hızlı/kararlı |
 
 ## Sorun giderme
 
@@ -147,6 +154,7 @@ start.sh          — SpoofDPI + bot orkestrasyonu
 - **Slash komutlar Discord'da görünmüyor** — `GUILD_ID` boşsa global sync 1 saate kadar sürer. Geliştirmede `GUILD_ID` set et.
 - **`/memory` boş ama bot "kaydettim" demişti** — Bu sadece konuşma; gerçek kayıt için tool calling gerekiyor (model çağırmadıysa) veya manuel `/remember`.
 - **Memory backend init failed** — `~/.sivrisinekcenk/mempalace` yazılabilir mi? `pip install mempalace` çalıştı mı? İlk run'da embedding model indirme başarısız mı?
+- **İlk ses mesajı 30+ saniye yanıtsız** — normal: `faster-whisper` modelini Hugging Face Hub'tan ilk kez indiriyor (`base` ~140 MB). Sonraki sesler hızlı. TR'de HF DPI engelliyse: `HTTPS_PROXY=http://127.0.0.1:8080 python -c "from faster_whisper import WhisperModel; WhisperModel('base')"` ile bir kez SpoofDPI üzerinden indir, sonra normal çalıştır.
 
 ## Lisans
 
