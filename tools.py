@@ -5,21 +5,24 @@ SAVE_MEMORY_TOOL = {
     "function": {
         "name": "save_memory",
         "description": (
-            "Kullanıcı veya kanal hakkında kalıcı bir bilgiyi hafızaya kaydet. "
+            "Kullanıcı, kanal veya tüm sunucu hakkında kalıcı bir bilgiyi hafızaya kaydet. "
             "Kullanıcı 'hatırla', 'kaydet', 'unutma', 'not al' gibi açık komutlar verdiğinde "
-            "ya da konuşmadan açık bir kişisel/kanal-spesifik gerçek (isim, tercih, meslek, "
-            "kanal bağlamı) öğrendiğinde kullan. Geçici durumları ('bugün canım sıkkın', "
-            "'yorgunum') KAYDETME. Aynı fact iki kez kaydedilmez (idempotent)."
+            "ya da konuşmadan açık bir kişisel/kanal/sunucu-spesifik gerçek (isim, tercih, "
+            "meslek, kanal/sunucu bağlamı) öğrendiğinde kullan. Geçici durumları "
+            "('bugün canım sıkkın', 'yorgunum') KAYDETME. Aynı fact iki kez kaydedilmez "
+            "(idempotent). guild scope DM'de kullanılamaz."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "scope": {
                     "type": "string",
-                    "enum": ["user", "channel"],
+                    "enum": ["user", "channel", "guild"],
                     "description": (
                         "user = mesajı gönderen kişiye özel fact (her kanalda hatırlanır). "
-                        "channel = bu kanalın kolektif bağlamı (kanaldaki herkesi etkiler)."
+                        "channel = bu kanalın kolektif bağlamı (kanaldaki herkesi etkiler). "
+                        "guild = sunucunun tamamında, her kanalda hatırlanan ortak bağlam "
+                        "(DM'de kullanılamaz — kullanıcı sunucu dışındaysa user veya channel kullan)."
                     ),
                 },
                 "fact": {

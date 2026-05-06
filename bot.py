@@ -184,6 +184,7 @@ async def clear_cmd(interaction: discord.Interaction):
 _SCOPE_CHOICES = [
     app_commands.Choice(name="user (sana özel)", value="user"),
     app_commands.Choice(name="channel (kanal ortak)", value="channel"),
+    app_commands.Choice(name="guild (sunucu ortak)", value="guild"),
 ]
 
 
@@ -194,11 +195,19 @@ async def remember_cmd(
     scope: app_commands.Choice[str],
     text: str,
 ):
+    if scope.value == "guild" and interaction.guild_id is None:
+        await interaction.response.send_message(
+            "DM'de guild scope yok — user ya da channel kullan.",
+            ephemeral=True,
+        )
+        return
     await interaction.response.defer(ephemeral=True, thinking=True)
     if scope.value == "user":
         await memory.add_user_fact(interaction.user.id, text, source="slash")
-    else:
+    elif scope.value == "channel":
         await memory.add_channel_fact(interaction.channel_id, text, source="slash")
+    else:
+        await memory.add_guild_fact(interaction.guild_id, text, source="slash")
     await interaction.followup.send(
         f"Hafızaya yazıldı ({scope.value}): {text[:200]}",
         ephemeral=True,
@@ -218,11 +227,19 @@ async def forget_cmd(
             ephemeral=True,
         )
         return
+    if scope.value == "guild" and interaction.guild_id is None:
+        await interaction.response.send_message(
+            "DM'de guild scope yok — user ya da channel kullan.",
+            ephemeral=True,
+        )
+        return
     await interaction.response.defer(ephemeral=True, thinking=True)
     if scope.value == "user":
         deleted = await memory.forget_user(interaction.user.id)
-    else:
+    elif scope.value == "channel":
         deleted = await memory.forget_channel(interaction.channel_id)
+    else:
+        deleted = await memory.forget_guild(interaction.guild_id)
     await interaction.followup.send(
         f"Persistent hafıza silindi ({scope.value}): {deleted} not.",
         ephemeral=True,
@@ -235,11 +252,19 @@ async def memory_list_cmd(
     interaction: discord.Interaction,
     scope: app_commands.Choice[str],
 ):
+    if scope.value == "guild" and interaction.guild_id is None:
+        await interaction.response.send_message(
+            "DM'de guild scope yok — user ya da channel kullan.",
+            ephemeral=True,
+        )
+        return
     await interaction.response.defer(ephemeral=True, thinking=True)
     if scope.value == "user":
         items = await memory.list_user_facts(interaction.user.id)
-    else:
+    elif scope.value == "channel":
         items = await memory.list_channel_facts(interaction.channel_id)
+    else:
+        items = await memory.list_guild_facts(interaction.guild_id)
     if not items:
         await interaction.followup.send("Hafıza boş.", ephemeral=True)
         return
@@ -253,7 +278,9 @@ async def memory_list_cmd(
 MAX_TOOL_ITERS = 4
 
 
-async def _dispatch_tool_call(tool_call, user_id: int, channel_id: int) -> str:
+async def _dispatch_tool_call(
+    tool_call, user_id: int, channel_id: int, guild_id: int | None
+) -> str:
     name = tool_call.function.name
     try:
         args = json.loads(tool_call.function.arguments or "{}")
@@ -263,16 +290,23 @@ async def _dispatch_tool_call(tool_call, user_id: int, channel_id: int) -> str:
     if name == "save_memory":
         scope = args.get("scope")
         fact = (args.get("fact") or "").strip()
-        if scope not in ("user", "channel") or not fact:
+        if scope not in ("user", "channel", "guild") or not fact:
             return json.dumps({
                 "ok": False,
-                "error": "scope must be 'user' or 'channel' and fact must be non-empty",
+                "error": "scope must be 'user', 'channel', or 'guild' and fact must be non-empty",
+            })
+        if scope == "guild" and guild_id is None:
+            return json.dumps({
+                "ok": False,
+                "error": "guild scope DM'de kullanılamaz; user veya channel kullan",
             })
         try:
             if scope == "user":
                 await memory.add_user_fact(user_id, fact, source="tool")
-            else:
+            elif scope == "channel":
                 await memory.add_channel_fact(channel_id, fact, source="tool")
+            else:
+                await memory.add_guild_fact(guild_id, fact, source="tool")
             return json.dumps({"ok": True, "scope": scope, "fact": fact})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -281,7 +315,10 @@ async def _dispatch_tool_call(tool_call, user_id: int, channel_id: int) -> str:
 
 
 async def _run_with_tools(
-    snapshot: list[dict], user_id: int, channel_id: int
+    snapshot: list[dict],
+    user_id: int,
+    channel_id: int,
+    guild_id: int | None,
 ) -> str:
     msg = None
     for _ in range(MAX_TOOL_ITERS):
@@ -307,7 +344,7 @@ async def _run_with_tools(
         })
 
         for tc in tool_calls:
-            result = await _dispatch_tool_call(tc, user_id, channel_id)
+            result = await _dispatch_tool_call(tc, user_id, channel_id, guild_id)
             snapshot.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -329,6 +366,7 @@ async def on_message(message: discord.Message):
     history_content = _format_for_history(message)
     llm_content = await _build_user_content(message)
     channel_id = message.channel.id
+    guild_id = message.guild.id if message.guild else None
 
     session = await session_store.get_or_create(channel_id)
     async with session.lock:
@@ -344,6 +382,7 @@ async def on_message(message: discord.Message):
             user_id=message.author.id,
             channel_id=channel_id,
             query=message.content or "",
+            guild_id=guild_id,
         )
     except Exception as e:
         print(f"[memory] retrieval failed: {e}", file=sys.stderr)
@@ -361,7 +400,7 @@ async def on_message(message: discord.Message):
 
     async with message.channel.typing():
         try:
-            cevap = await _run_with_tools(snapshot, message.author.id, channel_id)
+            cevap = await _run_with_tools(snapshot, message.author.id, channel_id, guild_id)
         except Exception as e:
             await message.reply(f"OpenAI tarafına bağlanırken patladık aga: {e}")
             return
@@ -387,16 +426,24 @@ async def on_message(message: discord.Message):
 
 @bot.tree.command(
     name="memory",
-    description="Kalıcı hafızanın tüm özetini göster (sana özel + bu kanal)",
+    description="Kalıcı hafızanın tüm özetini göster (user + channel + guild)",
 )
 async def memory_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
-    user_facts, chan_facts = await asyncio.gather(
-        memory.list_user_facts(interaction.user.id, limit=50),
-        memory.list_channel_facts(interaction.channel_id, limit=50),
-    )
+    in_guild = interaction.guild_id is not None
 
-    if not user_facts and not chan_facts:
+    list_tasks = [
+        memory.list_user_facts(interaction.user.id, limit=30),
+        memory.list_channel_facts(interaction.channel_id, limit=30),
+    ]
+    if in_guild:
+        list_tasks.append(memory.list_guild_facts(interaction.guild_id, limit=30))
+    results = await asyncio.gather(*list_tasks)
+    user_facts = results[0]
+    chan_facts = results[1]
+    guild_facts = results[2] if in_guild else []
+
+    if not user_facts and not chan_facts and not guild_facts:
         await interaction.followup.send(
             "Hafıza tamamen boş — `/remember` ile başlayabilirsin.",
             ephemeral=True,
@@ -414,11 +461,21 @@ async def memory_cmd(interaction: discord.Interaction):
         parts.extend(f"- {f}" for f in chan_facts)
     else:
         parts.append("(yok)")
+    if in_guild:
+        parts.append("")
+        parts.append("## Bu sunucuda hatırladıklarım")
+        if guild_facts:
+            parts.extend(f"- {f}" for f in guild_facts)
+        else:
+            parts.append("(yok)")
     parts.append("")
-    parts.append(
-        f"[user: {len(user_facts)} not • channel: {len(chan_facts)} not • "
-        f"palace: {config.MEMPALACE_PATH}]"
+    stats = (
+        f"[user: {len(user_facts)} • channel: {len(chan_facts)} • "
+        f"guild: {len(guild_facts)} • palace: {config.MEMPALACE_PATH}]"
+        if in_guild
+        else f"[user: {len(user_facts)} • channel: {len(chan_facts)} • DM • palace: {config.MEMPALACE_PATH}]"
     )
+    parts.append(stats)
 
     body = "\n".join(parts)
     msg = f"```\n{body}\n```"

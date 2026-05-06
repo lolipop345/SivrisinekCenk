@@ -66,11 +66,18 @@ class MemoryManager:
     def _channel_wing(channel_id: int) -> str:
         return f"channel_{int(channel_id)}"
 
+    @staticmethod
+    def _guild_wing(guild_id: int) -> str:
+        return f"guild_{int(guild_id)}"
+
     async def add_user_fact(self, user_id: int, fact: str, source: str = "manual"):
         return await self._add(self._user_wing(user_id), fact, source)
 
     async def add_channel_fact(self, channel_id: int, fact: str, source: str = "manual"):
         return await self._add(self._channel_wing(channel_id), fact, source)
+
+    async def add_guild_fact(self, guild_id: int, fact: str, source: str = "manual"):
+        return await self._add(self._guild_wing(guild_id), fact, source)
 
     async def _add(self, wing: str, fact: str, source: str):
         fact = fact.strip()
@@ -90,13 +97,18 @@ class MemoryManager:
         )
 
     async def query_relevant(
-        self, user_id: int, channel_id: int, query: str
+        self,
+        user_id: int,
+        channel_id: int,
+        query: str,
+        guild_id: int | None = None,
     ) -> list[str]:
         if not query.strip():
             return []
         await self._ensure_init()
         loop = asyncio.get_running_loop()
-        results = await asyncio.gather(
+
+        tasks = [
             loop.run_in_executor(
                 None,
                 lambda: self._tool_search(
@@ -117,8 +129,22 @@ class MemoryManager:
                     n_results=self._k,
                 ),
             ),
-            return_exceptions=True,
-        )
+        ]
+        if guild_id is not None:
+            tasks.append(
+                loop.run_in_executor(
+                    None,
+                    lambda: self._tool_search(
+                        query=query,
+                        palace_path=self._palace_path,
+                        wing=self._guild_wing(guild_id),
+                        room="facts",
+                        n_results=self._k,
+                    ),
+                )
+            )
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         out: list[str] = []
         for res in results:
             if isinstance(res, Exception):
@@ -158,6 +184,9 @@ class MemoryManager:
     async def forget_channel(self, channel_id: int) -> int:
         return await self._forget_wing(self._channel_wing(channel_id))
 
+    async def forget_guild(self, guild_id: int) -> int:
+        return await self._forget_wing(self._guild_wing(guild_id))
+
     async def _forget_wing(self, wing: str) -> int:
         ids = await self._all_drawer_ids_in_wing(wing)
         if not ids:
@@ -175,6 +204,9 @@ class MemoryManager:
 
     async def list_channel_facts(self, channel_id: int, limit: int = 100) -> list[str]:
         return await self._list_facts(self._channel_wing(channel_id), limit)
+
+    async def list_guild_facts(self, guild_id: int, limit: int = 100) -> list[str]:
+        return await self._list_facts(self._guild_wing(guild_id), limit)
 
     async def _list_facts(self, wing: str, limit: int) -> list[str]:
         await self._ensure_init()
