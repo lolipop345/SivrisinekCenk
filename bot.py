@@ -15,6 +15,7 @@ import config
 from llm_client import LLMClient
 from memory_manager import MemoryManager
 from session_store import SessionStore
+from tools import TOOLS
 
 
 def _preflight() -> None:
@@ -249,6 +250,77 @@ async def memory_list_cmd(
     await interaction.followup.send(msg, ephemeral=True)
 
 
+MAX_TOOL_ITERS = 4
+
+
+async def _dispatch_tool_call(tool_call, user_id: int, channel_id: int) -> str:
+    name = tool_call.function.name
+    try:
+        args = json.loads(tool_call.function.arguments or "{}")
+    except json.JSONDecodeError as e:
+        return json.dumps({"ok": False, "error": f"invalid args JSON: {e}"})
+
+    if name == "save_memory":
+        scope = args.get("scope")
+        fact = (args.get("fact") or "").strip()
+        if scope not in ("user", "channel") or not fact:
+            return json.dumps({
+                "ok": False,
+                "error": "scope must be 'user' or 'channel' and fact must be non-empty",
+            })
+        try:
+            if scope == "user":
+                await memory.add_user_fact(user_id, fact, source="tool")
+            else:
+                await memory.add_channel_fact(channel_id, fact, source="tool")
+            return json.dumps({"ok": True, "scope": scope, "fact": fact})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    return json.dumps({"ok": False, "error": f"unknown tool: {name}"})
+
+
+async def _run_with_tools(
+    snapshot: list[dict], user_id: int, channel_id: int
+) -> str:
+    msg = None
+    for _ in range(MAX_TOOL_ITERS):
+        msg = await llm.complete(snapshot, tools=TOOLS, return_message=True)
+        tool_calls = getattr(msg, "tool_calls", None)
+        if not tool_calls:
+            return (msg.content or "").strip()
+
+        snapshot.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in tool_calls
+            ],
+        })
+
+        for tc in tool_calls:
+            result = await _dispatch_tool_call(tc, user_id, channel_id)
+            snapshot.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+    return (
+        (msg.content or "").strip()
+        if msg is not None
+        else "Çok fazla tool çağrısı, vazgeçtim."
+    )
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author == bot.user:
@@ -289,7 +361,7 @@ async def on_message(message: discord.Message):
 
     async with message.channel.typing():
         try:
-            cevap = await llm.complete(snapshot)
+            cevap = await _run_with_tools(snapshot, message.author.id, channel_id)
         except Exception as e:
             await message.reply(f"OpenAI tarafına bağlanırken patladık aga: {e}")
             return
