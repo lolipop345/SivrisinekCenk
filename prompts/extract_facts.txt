@@ -1,0 +1,21 @@
+Görev: Aşağıdaki Discord konuşmasından, KULLANICI veya KANAL hakkında uzun
+vadede hatırlanmaya değer GERÇEK bilgi varsa JSON list döndür. Yoksa [].
+
+Sayılan bilgiler:
+- İsim, yaş, lokasyon, meslek (kullanıcı kendisi söylediyse)
+- Net tercihler ("kahve sevmem", "PHP yazıyorum", "kedi adı Pamuk")
+- Kanal-spesifik kalıcı bağlam ("burası senaryo yazma kanalı", "in-joke X")
+
+Sayılmayanlar:
+- Anlık duygu/durum ("bugün canım sıkkın", "yorgunum")
+- Bot'a verilen komutlar
+- Güncel olaylar/haberler
+- Teyit edilmemiş söylentiler
+
+Mesajlar "<isim>: ..." formatında geliyor; isim yardımcı ama Discord ID'si değil.
+target_id için yukarıda verilen kullanıcı ID'si veya kanal ID'sini kullan.
+
+Çıktı formatı KESİNLİKLE şöyle (saf JSON list, fazladan açıklama YOK):
+[{"scope":"user|channel", "target_id":<int>, "fact":"..."}]
+
+Hiç fact yoksa: []

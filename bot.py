@@ -1,14 +1,19 @@
+import asyncio
 import base64
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import config
 from llm_client import LLMClient
+from memory_manager import MemoryManager
 from session_store import SessionStore
 
 
@@ -57,6 +62,19 @@ def _preflight() -> None:
 
     print(f"[preflight] LLM ({base}) and Discord{' via '+proxy if proxy else ''} OK", flush=True)
 
+    try:
+        config.MEMPALACE_PATH.mkdir(parents=True, exist_ok=True)
+        if not os.access(config.MEMPALACE_PATH, os.W_OK):
+            raise PermissionError(f"{config.MEMPALACE_PATH} not writable")
+        os.environ.setdefault("MEMPALACE_PALACE_PATH", str(config.MEMPALACE_PATH))
+        import mempalace  # noqa: F401  (triggers chromadb + onnx model first-run download)
+    except Exception as e:
+        print(f"[preflight] memory backend init failed: {e}", file=sys.stderr)
+        print(f"[preflight] check {config.MEMPALACE_PATH} or run 'pip install mempalace'", file=sys.stderr)
+        print("[preflight] embedding model download issue? chroma uses S3 (not HF), so DPI usually OK", file=sys.stderr)
+        sys.exit(1)
+    print(f"[preflight] memory palace at {config.MEMPALACE_PATH} OK", flush=True)
+
 
 _preflight()
 
@@ -73,6 +91,16 @@ llm = LLMClient(
     base_url=config.OPENAI_BASE_URL,
     api_key=config.OPENAI_API_KEY,
     model=config.OPENAI_MODEL,
+)
+
+EXTRACT_PROMPT = (Path(__file__).parent / "prompts" / "extract_facts.txt") \
+    .read_text(encoding="utf-8").strip()
+memory = MemoryManager(
+    palace_path=config.MEMPALACE_PATH,
+    llm=llm,
+    extract_prompt=EXTRACT_PROMPT,
+    retrieval_k=config.MEMORY_RETRIEVAL_K,
+    min_fact_len=config.MEMORY_MIN_FACT_LEN,
 )
 
 
@@ -143,10 +171,82 @@ async def on_ready():
     print(f"SivrisinekCenk yayında! {config.OPENAI_MODEL} hazır.")
 
 
-@bot.tree.command(name="clear", description="Bu kanaldaki konuşma context'ini sıfırla")
+@bot.tree.command(name="clear", description="Bu kanaldaki kısa hafızayı sıfırla")
 async def clear_cmd(interaction: discord.Interaction):
     await session_store.clear(interaction.channel_id)
-    await interaction.response.send_message("Yeni context açıldı, hafıza sıfır.", ephemeral=True)
+    await interaction.response.send_message(
+        "Yeni context açıldı, kısa hafıza sıfır. (Kalıcı hafıza dokunulmadı — silmek için /forget)",
+        ephemeral=True,
+    )
+
+
+_SCOPE_CHOICES = [
+    app_commands.Choice(name="user (sana özel)", value="user"),
+    app_commands.Choice(name="channel (kanal ortak)", value="channel"),
+]
+
+
+@bot.tree.command(name="remember", description="Kalıcı hafızaya not ekle")
+@app_commands.choices(scope=_SCOPE_CHOICES)
+async def remember_cmd(
+    interaction: discord.Interaction,
+    scope: app_commands.Choice[str],
+    text: str,
+):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    if scope.value == "user":
+        await memory.add_user_fact(interaction.user.id, text, source="slash")
+    else:
+        await memory.add_channel_fact(interaction.channel_id, text, source="slash")
+    await interaction.followup.send(
+        f"Hafızaya yazıldı ({scope.value}): {text[:200]}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="forget", description="Kalıcı hafızayı sil (geri alınamaz)")
+@app_commands.choices(scope=_SCOPE_CHOICES)
+async def forget_cmd(
+    interaction: discord.Interaction,
+    scope: app_commands.Choice[str],
+    confirm: str,
+):
+    if confirm.strip().lower() not in ("evet sil", "yes delete"):
+        await interaction.response.send_message(
+            "İptal — silmek için confirm parametresine `evet sil` yaz.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    if scope.value == "user":
+        deleted = await memory.forget_user(interaction.user.id)
+    else:
+        deleted = await memory.forget_channel(interaction.channel_id)
+    await interaction.followup.send(
+        f"Persistent hafıza silindi ({scope.value}): {deleted} not.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="memory_list", description="Kalıcı hafızadaki notları listele")
+@app_commands.choices(scope=_SCOPE_CHOICES)
+async def memory_list_cmd(
+    interaction: discord.Interaction,
+    scope: app_commands.Choice[str],
+):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    if scope.value == "user":
+        items = await memory.list_user_facts(interaction.user.id)
+    else:
+        items = await memory.list_channel_facts(interaction.channel_id)
+    if not items:
+        await interaction.followup.send("Hafıza boş.", ephemeral=True)
+        return
+    body = "\n".join(f"- {x}" for x in items[:30])
+    msg = f"```\n{body}\n```"
+    if len(msg) > 1990:
+        msg = msg[:1985] + "\n```"
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 @bot.event
@@ -167,6 +267,26 @@ async def on_message(message: discord.Message):
         if isinstance(llm_content, list):
             snapshot[-1] = {"role": "user", "content": llm_content}
 
+    try:
+        notes = await memory.query_relevant(
+            user_id=message.author.id,
+            channel_id=channel_id,
+            query=message.content or "",
+        )
+    except Exception as e:
+        print(f"[memory] retrieval failed: {e}", file=sys.stderr)
+        notes = []
+    if notes:
+        bullet = "\n".join(f"- {n}" for n in notes)
+        snapshot.insert(1, {
+            "role": "system",
+            "content": (
+                "## Kalıcı hafızadaki ilgili notlar\n"
+                "(önceki konuşmalardan damıtılmış kalıcı bilgiler — bağlam olarak kullan, "
+                "gerek olmadıkça aynen tekrar etme)\n" + bullet
+            ),
+        })
+
     async with message.channel.typing():
         try:
             cevap = await llm.complete(snapshot)
@@ -181,6 +301,16 @@ async def on_message(message: discord.Message):
     async with session.lock:
         await session_store.append(channel_id, "assistant", cevap)
     await message.reply(cevap)
+
+    if config.MEMORY_AUTO_EXTRACT:
+        async with session.lock:
+            post_snapshot = list(session.messages)
+        asyncio.create_task(memory.maybe_auto_extract(
+            channel_id=channel_id,
+            author_id=message.author.id,
+            snapshot=post_snapshot,
+            every_n=config.MEMORY_EXTRACT_EVERY_N_MESSAGES,
+        ))
 
 
 bot.run(config.DISCORD_TOKEN)

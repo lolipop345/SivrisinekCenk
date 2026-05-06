@@ -71,9 +71,31 @@ State lives in `session_store.py` and is in-memory only (lost on restart).
 - **Locking:** Each `Session` has its own `asyncio.Lock`. `bot.py` holds it only across list mutations (append, snapshot) — never across the LLM call, so a slow completion does not block the channel.
 - **Multi-modal:** Image attachments (MIME `image/*`) are downloaded by the bot itself (via `discord.Attachment.read()`, which goes through `bot.http`'s session and therefore through `DISCORD_PROXY` if set) and **base64-encoded** into the LLM payload as `{"type": "image_url", "image_url": {"url": "data:<mime>;base64,..."}}` data-URL parts via `_build_user_content`. The LLM server therefore never makes its own outbound HTTP request — important when the server (e.g. `llama-server`) runs without proxy support and Discord CDN is firewalled. History stores only a text-only line `<display_name>: <content> [resim: <filename>]` (no URL, no base64) via `_format_for_history`; visual context is carried forward by the bot's own text replies.
 
+## Persistent memory (long-term)
+
+Beyond per-channel session history, the bot has a vector-memory backend that **survives restarts and the session TTL**. State lives in a MemPalace palace at `MEMPALACE_PATH` (default `~/.sivrisinekcenk/mempalace/`). Backend: ChromaDB + ONNX-runtime `all-MiniLM-L6-v2` embeddings (downloaded from Chroma's S3 mirror on first run, ~80 MB; **no Hugging Face dependency**, so TR DPI is not an issue).
+
+- **Dual scope** (`memory_manager.py`):
+  - `wing="user_<discord_user_id>"`, `room="facts"` — facts that follow a user across channels.
+  - `wing="channel_<discord_channel_id>"`, `room="facts"` — facts about a channel's collective context.
+- **Retrieval:** On every triggered reply, both stores are queried in parallel with `MEMORY_RETRIEVAL_K` results each (default 3+3). Hits are deduplicated and injected as a `system` message at index 1 (right after the persona). Retrieved notes are **not** appended to session history — they are recomputed each turn, so they never bayatlamaz and history doesn't bloat.
+- **Writing:** Two paths.
+  - **Manual:** `/remember scope:<user|channel> text:<...>` slash command.
+  - **Automatic:** Every `MEMORY_EXTRACT_EVERY_N_MESSAGES` user messages (default 8) per channel, the bot fires an out-of-band LLM call (`prompts/extract_facts.txt`) asking it to distill long-lived facts as a JSON list. Results are written to the appropriate wing. The call runs in `asyncio.create_task` outside `session.lock` — auto-extract never blocks user replies, errors are silenced. Disable via `MEMORY_AUTO_EXTRACT=false`. Per-channel `_extract_locks` guard prevents overlapping extraction tasks.
+- **Forgetting:**
+  - `/clear` — wipes only the in-memory short-term session for the channel. Does **not** touch persistent memory. Reply text reflects this.
+  - `/forget scope:<user|channel> confirm:"evet sil"` — deletes the entire user-wing or channel-wing. Pagination over `tool_list_drawers` + `tool_delete_drawer` loop. Irreversible.
+  - `/memory_list scope:<user|channel>` — lists current notes (ephemeral, first 30, 2000 char cap).
+- **Privacy:** A user's facts only feed retrieval when that user is speaking (wing key is `f"user_{message.author.id}"`). Channel facts only fire in their channel (wing key is `f"channel_{channel.id}"`). Cross-leak is the highest risk and was smoke-tested in the round-trip script — wing key formatting is the single point of correctness.
+- **Idempotency:** `tool_add_drawer` derives a deterministic SHA256-based ID from `(wing, room, content)`; identical content is silently skipped (`reason: "already_exists"`).
+- **Cost:** Auto-extract = one LLM call per N user messages per channel. With local llama-server it's free token-wise but adds ~1-3 s of GPU work. Reply latency unaffected (fire-and-forget).
+
 ## Slash commands
 
-- `/clear` — Resets the session for the channel it was invoked in. Replies ephemerally.
+- `/clear` — Resets the **short-term** session for the channel only. Replies ephemerally.
+- `/remember scope text` — Adds a fact to persistent memory (user or channel scope).
+- `/forget scope confirm` — Deletes the entire user-wing or channel-wing of persistent memory. `confirm` must equal `evet sil` or `yes delete`.
+- `/memory_list scope` — Lists current persistent notes for the user or channel (ephemeral).
 
 Slash commands are synced once in `bot.setup_hook` (called by discord.py before `on_ready`, only once per process).
 
