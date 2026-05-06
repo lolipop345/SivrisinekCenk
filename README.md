@@ -57,9 +57,10 @@ SPOOFDPI_BIN=/Users/sen/Desktop/spoofdpi
 
 ### 5) Çalıştır
 ```bash
-./start.sh
+./start.sh         # macOS / Linux
+.\start.ps1        # Windows PowerShell (start.sh'in muadili)
 ```
-`start.sh` SpoofDPI'ı (gerekiyorsa) başlatır, sonra bot'u foreground'da çalıştırır. Çıktı:
+`start.sh` (veya `start.ps1`) SpoofDPI'ı (gerekiyorsa) başlatır, sonra bot'u foreground'da çalıştırır. Çıktı:
 ```
 [start] SpoofDPI :8080 already running, reusing
 [preflight] LLM (...) and Discord via http://127.0.0.1:8080 OK
