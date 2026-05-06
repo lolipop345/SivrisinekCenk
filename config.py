@@ -24,3 +24,12 @@ _guild_id = os.getenv("GUILD_ID", "").strip()
 SLASH_COMMAND_GUILD_ID = int(_guild_id) if _guild_id else None
 
 DISCORD_PROXY = os.getenv("DISCORD_PROXY", "").strip() or None
+
+MEMPALACE_PATH = Path(os.getenv(
+    "MEMPALACE_PATH",
+    str(Path.home() / ".sivrisinekcenk" / "mempalace"),
+)).expanduser()
+MEMORY_AUTO_EXTRACT = os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true"
+MEMORY_EXTRACT_EVERY_N_MESSAGES = int(os.getenv("MEMORY_EXTRACT_EVERY_N_MESSAGES", "8"))
+MEMORY_RETRIEVAL_K = int(os.getenv("MEMORY_RETRIEVAL_K", "3"))
+MEMORY_MIN_FACT_LEN = int(os.getenv("MEMORY_MIN_FACT_LEN", "6"))
